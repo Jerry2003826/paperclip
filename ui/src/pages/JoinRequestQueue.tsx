@@ -23,9 +23,9 @@ export function JoinRequestQueue() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? t("pages.joinRequestQueue.breadcrumbCompany", { defaultValue: "Company" }), href: "/dashboard" },
-      { label: t("pages.joinRequestQueue.breadcrumbInbox", { defaultValue: "Inbox" }), href: "/inbox" },
-      { label: t("pages.joinRequestQueue.breadcrumbJoinRequests", { defaultValue: "Join Requests" }) },
+      { label: selectedCompany?.name ?? "Organization", href: "/dashboard" },
+      { label: "Inbox", href: "/inbox" },
+      { label: "Join Requests" },
     ]);
   }, [selectedCompany?.name, setBreadcrumbs, t]);
 
@@ -59,7 +59,7 @@ export function JoinRequestQueue() {
   });
 
   if (!selectedCompanyId) {
-    return <div className="text-sm text-muted-foreground">{t("pages.joinRequestQueue.selectCompany", { defaultValue: "Select a company to review join requests." })}</div>;
+    return <div className="text-sm text-muted-foreground">{t("pages.joinRequestQueue.selectCompany", { defaultValue: "Select an organization to review join requests." })}</div>;
   }
 
   if (requestsQuery.isLoading) {
@@ -69,7 +69,7 @@ export function JoinRequestQueue() {
   if (requestsQuery.error) {
     const message =
       requestsQuery.error instanceof ApiError && requestsQuery.error.status === 403
-        ? t("pages.joinRequestQueue.noPermission", { defaultValue: "You do not have permission to review join requests for this company." })
+        ? t("pages.joinRequestQueue.noPermission", { defaultValue: "You do not have permission to review join requests for this organization." })
         : requestsQuery.error instanceof Error
           ? requestsQuery.error.message
           : t("pages.joinRequestQueue.failedToLoad", { defaultValue: "Failed to load join requests." });

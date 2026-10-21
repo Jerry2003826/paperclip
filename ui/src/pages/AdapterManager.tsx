@@ -273,10 +273,9 @@ export function AdapterManager() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? t("pages.adapterManager.company", { defaultValue: "Company" }), href: "/dashboard" },
-      { label: t("pages.adapterManager.settings", { defaultValue: "Settings" }), href: "/company/settings" },
-      { label: t("pages.adapterManager.instanceSettings", { defaultValue: "Instance settings" }), href: "/company/settings/instance/general" },
-      { label: t("pages.adapterManager.adapters", { defaultValue: "Adapters" }) },
+      { label: selectedCompany?.name ?? "Organization", href: "/dashboard" },
+      { label: "Settings", href: "/company/settings" },
+      { label: "Adapters" },
     ]);
   }, [selectedCompany?.name, setBreadcrumbs, t]);
 
@@ -413,7 +412,7 @@ export function AdapterManager() {
   const isMutating = installMutation.isPending || removeMutation.isPending || toggleMutation.isPending || overrideMutation.isPending || reloadMutation.isPending || reinstallMutation.isPending;
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="max-w-6xl space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -637,7 +636,6 @@ export function AdapterManager() {
                     supportsSkills: false,
                     supportsLocalAgentJwt: false,
                     requiresMaterializedRuntimeSkills: false,
-                    supportsModelProfiles: false,
                     supportsAcp: false,
                   },
                 }}

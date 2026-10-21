@@ -1,132 +1,36 @@
-import { ChangeEvent, Fragment, useEffect, useState } from "react";
+import { ChangeEvent, useEffect, useState } from "react";
+import { t, useTranslation } from "@/i18n";
+import { AgentObservabilitySettingsSection } from "../components/observability/AgentObservabilitySettings";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES,
-  MAX_COMPANY_ATTACHMENT_MAX_BYTES,
-  ISSUE_THREAD_INTERACTION_KINDS,
   type InteractionResolverGovernance,
   type IssueThreadInteractionKind,
-  type IssueThreadInteractionResolverPolicy,
 } from "@paperclipai/shared";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
+import { useOptionalToastActions } from "../context/ToastContext";
+import { useCloudInstance } from "../hooks/useCloudInstance";
+import { resolveCompanyArchiveDeparture } from "../lib/company-selection";
+import { cloudPortfolioManageUrl } from "../lib/cloudLinks";
+import { navigateTopLevel } from "@/lib/browserNavigation";
 import { companiesApi } from "../api/companies";
 import { assetsApi } from "../api/assets";
 import { queryKeys } from "../lib/queryKeys";
-import { Link } from "@/lib/router";
 import { Button } from "@/components/ui/button";
+import { SlidersHorizontal } from "lucide-react";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Settings, Download, Upload } from "lucide-react";
-import { t, useTranslation } from "@/i18n";
+  InteractionGovernancePanel,
+  applyGovernanceChange,
+  type GovernanceField,
+  type GovernanceSelectValue,
+} from "../components/InteractionGovernancePanel";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
 import {
   Field,
   ToggleField,
 } from "../components/agent-config-primitives";
-
-const BYTES_PER_MIB = 1024 * 1024;
-const DEFAULT_COMPANY_ATTACHMENT_MAX_MIB = DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES / BYTES_PER_MIB;
-const MAX_COMPANY_ATTACHMENT_MAX_MIB = MAX_COMPANY_ATTACHMENT_MAX_BYTES / BYTES_PER_MIB;
-
-const INTERACTION_KIND_LABELS: Record<IssueThreadInteractionKind, string> = {
-  suggest_tasks: t("pages.companySettings.interactionKind.suggestTasks", { defaultValue: "Suggested tasks" }),
-  ask_user_questions: t("pages.companySettings.interactionKind.askUserQuestions", { defaultValue: "Ask user questions" }),
-  request_confirmation: t("pages.companySettings.interactionKind.requestConfirmation", { defaultValue: "Confirmations" }),
-  request_checkbox_confirmation: t("pages.companySettings.interactionKind.requestCheckboxConfirmation", { defaultValue: "Checkbox confirmations" }),
-  request_item_verdicts: t("pages.companySettings.interactionKind.requestItemVerdicts", { defaultValue: "Item verdicts" }),
-};
-
-// Sentinel for "no override" — Radix Select disallows empty-string item values.
-const GOVERNANCE_UNSET = "default";
-type GovernanceSelectValue = typeof GOVERNANCE_UNSET | IssueThreadInteractionResolverPolicy;
-
-const GOVERNANCE_POLICY_OPTIONS: { value: GovernanceSelectValue; label: string }[] = [
-  { value: GOVERNANCE_UNSET, label: t("pages.companySettings.policyOption.companyDefault", { defaultValue: "Company default" }) },
-  { value: "board_only", label: t("pages.companySettings.policyOption.boardOnly", { defaultValue: "Board only" }) },
-  { value: "board_or_agents", label: t("pages.companySettings.policyOption.boardOrAgents", { defaultValue: "Board or agents" }) },
-];
-
-function toSelectValue(policy: IssueThreadInteractionResolverPolicy | undefined): GovernanceSelectValue {
-  return policy ?? GOVERNANCE_UNSET;
-}
-
-/**
- * Apply a single (kind, field) change to a governance map immutably, pruning
- * empty entries so the persisted object stays sparse (only real overrides).
- */
-function applyGovernanceChange(
-  current: InteractionResolverGovernance,
-  kind: IssueThreadInteractionKind,
-  field: "defaultPolicy" | "cap",
-  value: GovernanceSelectValue,
-): InteractionResolverGovernance {
-  const next: InteractionResolverGovernance = { ...current };
-  const entry = { ...(next[kind] ?? {}) };
-  if (value === GOVERNANCE_UNSET) {
-    delete entry[field];
-  } else {
-    entry[field] = value;
-  }
-  if (entry.defaultPolicy === undefined && entry.cap === undefined) {
-    delete next[kind];
-  } else {
-    next[kind] = entry;
-  }
-  return next;
-}
-function GovernanceSelect({
-  value,
-  onChange,
-  disabled,
-  testId,
-  ariaLabel,
-  mobileLabel,
-}: {
-  value: GovernanceSelectValue;
-  onChange: (value: GovernanceSelectValue) => void;
-  disabled?: boolean;
-  testId?: string;
-  ariaLabel: string;
-  mobileLabel: string;
-}) {
-  return (
-    <div className="min-w-0">
-      {/*
-       * Below `sm` the governance grid collapses to a single column (see the
-       * grid classes on the panel), detaching each select from its column
-       * header. Surface a mobile-only inline label so the control stays
-       * self-describing for sighted users, and always carry `aria-label` for
-       * screen-reader pairing. WCAG 2.1 SC 1.4.10 (Reflow) — design review R2.
-       */}
-      <span className="mb-1 block text-xs font-medium text-muted-foreground uppercase tracking-wide sm:hidden">
-        {mobileLabel}
-      </span>
-      <Select value={value} onValueChange={(v) => onChange(v as GovernanceSelectValue)} disabled={disabled}>
-        <SelectTrigger
-          size="sm"
-          aria-label={ariaLabel}
-          className="w-full min-w-0 text-xs sm:w-(--sz-170px)"
-          data-testid={testId}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {GOVERNANCE_POLICY_OPTIONS.map((option) => (
-            <SelectItem key={option.value} value={option.value} className="text-xs">
-              {option.label}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </div>
-  );
-}
+import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
 
 export function CompanySettings() {
   const {
@@ -138,11 +42,15 @@ export function CompanySettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const toastActions = useOptionalToastActions();
+  const cloud = useCloudInstance();
+  // Managed instances derive the task ID prefix from the company name, so a
+  // rename here also renumbers the existing task IDs.
+  const isCloudManaged = Boolean(cloud);
   // General settings local state
   const [companyName, setCompanyName] = useState("");
   const [description, setDescription] = useState("");
-  const [brandColor, setBrandColor] = useState("");
-  const [attachmentMaxMiB, setAttachmentMaxMiB] = useState(String(DEFAULT_COMPANY_ATTACHMENT_MAX_MIB));
   const [logoUrl, setLogoUrl] = useState("");
   const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
   const [governance, setGovernance] = useState<InteractionResolverGovernance>({});
@@ -152,31 +60,19 @@ export function CompanySettings() {
     if (!selectedCompany) return;
     setCompanyName(selectedCompany.name);
     setDescription(selectedCompany.description ?? "");
-    setBrandColor(selectedCompany.brandColor ?? "");
-    setAttachmentMaxMiB(String(Math.round((selectedCompany.attachmentMaxBytes ?? DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES) / BYTES_PER_MIB)));
     setLogoUrl(selectedCompany.logoUrl ?? "");
     setGovernance(selectedCompany.interactionResolverGovernance ?? {});
   }, [selectedCompany]);
 
-  const attachmentMaxBytes = Number.parseInt(attachmentMaxMiB, 10) * BYTES_PER_MIB;
-  const attachmentMaxValid =
-    Number.isInteger(attachmentMaxBytes)
-    && attachmentMaxBytes >= BYTES_PER_MIB
-    && attachmentMaxBytes <= MAX_COMPANY_ATTACHMENT_MAX_BYTES;
-
   const generalDirty =
     !!selectedCompany &&
     (companyName !== selectedCompany.name ||
-      description !== (selectedCompany.description ?? "") ||
-      brandColor !== (selectedCompany.brandColor ?? "") ||
-      attachmentMaxBytes !== (selectedCompany.attachmentMaxBytes ?? DEFAULT_COMPANY_ATTACHMENT_MAX_BYTES));
+      description !== (selectedCompany.description ?? ""));
 
   const generalMutation = useMutation({
     mutationFn: (data: {
       name: string;
       description: string | null;
-      brandColor: string | null;
-      attachmentMaxBytes: number;
     }) => companiesApi.update(selectedCompanyId!, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
@@ -204,7 +100,7 @@ export function CompanySettings() {
 
   function handleGovernanceChange(
     kind: IssueThreadInteractionKind,
-    field: "defaultPolicy" | "cap",
+    field: GovernanceField,
     value: GovernanceSelectValue,
   ) {
     const next = applyGovernanceChange(governance, kind, field, value);
@@ -249,16 +145,44 @@ export function CompanySettings() {
   }
 
   const archiveMutation = useMutation({
-    mutationFn: ({
-      companyId,
-      nextCompanyId
-    }: {
-      companyId: string;
-      nextCompanyId: string | null;
-    }) => companiesApi.archive(companyId).then(() => ({ nextCompanyId })),
-    onSuccess: async ({ nextCompanyId }) => {
-      if (nextCompanyId) {
-        setSelectedCompanyId(nextCompanyId);
+    mutationFn: ({ companyId }: { companyId: string }) =>
+      companiesApi.archive(companyId),
+    onSuccess: async (_result, { companyId }) => {
+      // Never stay on the archived company's settings: the only visible
+      // change would be the archive button going inert. Leave for wherever
+      // still makes sense (another active company, the Cloud portfolio, or
+      // the companies list), with a toast naming what happened.
+      const archived = companies.find((company) => company.id === companyId);
+      const archivedName = archived?.name ?? "Organization";
+      const departure = resolveCompanyArchiveDeparture({
+        archivedCompanyId: companyId,
+        companies,
+        cloudPortfolioUrl: cloudPortfolioManageUrl(cloud?.cloudBaseUrl),
+      });
+      if (departure.kind === "cloud_portfolio") {
+        // The whole organization is on its way to being archived by the
+        // control plane; a full navigation to the Cloud portfolio replaces
+        // this document, so cache invalidation below would never run.
+        navigateTopLevel(departure.url);
+        return;
+      }
+      if (departure.kind === "company") {
+        toastActions?.pushToast({
+          title: `${archivedName} is archived`,
+          body: `Switched to ${departure.company.name}.`,
+          tone: "info",
+          dedupeKey: `company-archive-departure:${companyId}`,
+        });
+        setSelectedCompanyId(departure.company.id);
+        navigate(`/${departure.company.issuePrefix}/dashboard`, { replace: true });
+      } else {
+        toastActions?.pushToast({
+          title: `${archivedName} is archived`,
+          body: "You can unarchive it from this list.",
+          tone: "info",
+          dedupeKey: `company-archive-departure:${companyId}`,
+        });
+        navigate(`/${archived?.issuePrefix ?? ""}/companies`, { replace: true });
       }
       await queryClient.invalidateQueries({
         queryKey: queryKeys.companies.all
@@ -279,7 +203,7 @@ export function CompanySettings() {
   if (!selectedCompany) {
     return (
       <div className="text-sm text-muted-foreground">
-        {t("pages.companySettings.noCompanySelected", { defaultValue: "No company selected. Select a company from the switcher above." })}
+        {t("pages.companySettings.noCompanySelected", { defaultValue: "No organization selected. Select an organization from the switcher above." })}
       </div>
     );
   }
@@ -287,42 +211,46 @@ export function CompanySettings() {
   function handleSaveGeneral() {
     generalMutation.mutate({
       name: companyName.trim(),
-      description: description.trim() || null,
-      brandColor: brandColor || null,
-      attachmentMaxBytes
+      description: description.trim() || null
     });
   }
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-6xl space-y-8">
       <div className="flex items-center gap-2">
-        <Settings className="h-5 w-5 text-muted-foreground" />
-        <h1 className="text-lg font-semibold">{t("pages.companySettings.title", { defaultValue: "Company Settings" })}</h1>
+        <SlidersHorizontal className="h-5 w-5 text-muted-foreground" />
+        <h1 className="text-lg font-semibold">General</h1>
       </div>
 
       {/* General */}
-      <div className="space-y-4">
+      <div className="max-w-2xl space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           {t("pages.companySettings.general", { defaultValue: "General" })}
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
-          <Field label={t("pages.companySettings.companyName", { defaultValue: "Company name" })} hint={t("pages.companySettings.companyNameHint", { defaultValue: "The display name for your company." })}>
+        <div className="space-y-3">
+          <Field label="Organization name" hint="The display name for your organization.">
             <input
               className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
               type="text"
               value={companyName}
               onChange={(e) => setCompanyName(e.target.value)}
             />
+            {isCloudManaged && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Renaming can change this company's task ID prefix. Existing task IDs are
+                renumbered and old task links stop resolving.
+              </p>
+            )}
           </Field>
           <Field
-            label={t("pages.companySettings.description", { defaultValue: "Description" })}
-            hint={t("pages.companySettings.descriptionHint", { defaultValue: "Optional description shown in the company profile." })}
+            label="Description"
+            hint="Optional description shown in the organization profile."
           >
             <input
               className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
               type="text"
               value={description}
-              placeholder={t("pages.companySettings.descriptionPlaceholder", { defaultValue: "Optional company description" })}
+              placeholder={t("pages.companySettings.descriptionPlaceholder", { defaultValue: "Optional organization description" })}
               onChange={(e) => setDescription(e.target.value)}
             />
           </Field>
@@ -330,17 +258,16 @@ export function CompanySettings() {
       </div>
 
       {/* Appearance */}
-      <div className="space-y-4">
+      <div className="max-w-2xl space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           {t("pages.companySettings.appearance", { defaultValue: "Appearance" })}
         </div>
-        <div className="space-y-3 rounded-md border border-border px-4 py-4">
+        <div className="space-y-3">
           <div className="flex items-start gap-4">
             <div className="shrink-0">
               <CompanyPatternIcon
                 companyName={companyName || selectedCompany.name}
                 logoUrl={logoUrl || null}
-                brandColor={brandColor || null}
                 className="rounded-(--rad-14)"
               />
             </div>
@@ -386,66 +313,6 @@ export function CompanySettings() {
                   )}
                 </div>
               </Field>
-              <Field
-                label={t("pages.companySettings.brandColor", { defaultValue: "Brand color" })}
-                hint={t("pages.companySettings.brandColorHint", { defaultValue: "Sets the hue for the company icon. Leave empty for auto-generated color." })}
-              >
-                <div className="flex items-center gap-2">
-                  {/* token-extraction: allowlisted — <input type="color"> value must be a real hex string, not a var() reference. */}
-                  <input
-                    type="color"
-                    value={brandColor || "#6366f1"}
-                    onChange={(e) => setBrandColor(e.target.value)}
-                    className="h-8 w-8 cursor-pointer rounded border border-border bg-transparent p-0"
-                  />
-                  <input
-                    type="text"
-                    value={brandColor}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "" || /^#[0-9a-fA-F]{0,6}$/.test(v)) {
-                        setBrandColor(v);
-                      }
-                    }}
-                    placeholder={t("pages.companySettings.auto", { defaultValue: "Auto" })}
-                    className="w-28 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none"
-                  />
-                  {brandColor && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setBrandColor("")}
-                      className="text-xs text-muted-foreground"
-                    >
-                      {t("pages.companySettings.clear", { defaultValue: "Clear" })}
-                    </Button>
-                  )}
-                </div>
-              </Field>
-              <Field
-                label={t("pages.companySettings.attachmentSizeLimit", { defaultValue: "Attachment size limit" })}
-                hint={t("pages.companySettings.attachmentSizeLimitHint", { defaultValue: "Accepted range: 1-{{max}} MiB.", max: MAX_COMPANY_ATTACHMENT_MAX_MIB })}
-              >
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={1}
-                      max={MAX_COMPANY_ATTACHMENT_MAX_MIB}
-                      step={1}
-                      value={attachmentMaxMiB}
-                      onChange={(e) => setAttachmentMaxMiB(e.target.value)}
-                      className="w-28 rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-                    />
-                    <span className="text-xs text-muted-foreground">MiB</span>
-                  </div>
-                  {!attachmentMaxValid && (
-                    <span className="text-xs text-destructive">
-                      {t("pages.companySettings.attachmentSizeInvalid", { defaultValue: "Enter a whole number from 1 to {{max}}.", max: MAX_COMPANY_ATTACHMENT_MAX_MIB })}
-                    </span>
-                  )}
-                </div>
-              </Field>
             </div>
           </div>
         </div>
@@ -457,7 +324,7 @@ export function CompanySettings() {
           <Button
             size="sm"
             onClick={handleSaveGeneral}
-            disabled={generalMutation.isPending || !companyName.trim() || !attachmentMaxValid}
+            disabled={generalMutation.isPending || !companyName.trim()}
           >
             {generalMutation.isPending ? t("pages.companySettings.saving", { defaultValue: "Saving..." }) : t("pages.companySettings.saveChanges", { defaultValue: "Save changes" })}
           </Button>
@@ -475,11 +342,11 @@ export function CompanySettings() {
       )}
 
       {/* Hiring */}
-      <div className="space-y-4" data-testid="company-settings-team-section">
+      <div className="max-w-2xl space-y-4" data-testid="company-settings-team-section">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           {t("pages.companySettings.hiring", { defaultValue: "Hiring" })}
         </div>
-        <div className="rounded-md border border-border px-4 py-3">
+        <div>
           <ToggleField
             label={t("pages.companySettings.requireBoardApproval", { defaultValue: "Require board approval for new hires" })}
             hint={t("pages.companySettings.requireBoardApprovalHint", { defaultValue: "New agent hires stay pending until approved by board." })}
@@ -491,104 +358,32 @@ export function CompanySettings() {
       </div>
 
       {/* Interaction governance */}
-      <div className="space-y-4" data-testid="company-settings-interaction-governance-section">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          {t("pages.companySettings.interactionGovernance", { defaultValue: "Interaction governance" })}
-        </div>
-        <div className="space-y-4 rounded-md border border-border px-4 py-4">
-          <p className="text-sm text-muted-foreground">
-            {t("pages.companySettings.interactionGovernanceDescription", { defaultValue: "Control who may resolve each kind of thread interaction." })}{" "}
-            <span className="font-medium text-foreground">{t("pages.companySettings.defaultPolicy", { defaultValue: "Default policy" })}</span>{" "}
-            {t("pages.companySettings.interactionGovernanceIsPolicy", { defaultValue: "is the resolver policy new interactions request;" })}{" "}
-            <span className="font-medium text-foreground">{t("pages.companySettings.cap", { defaultValue: "Cap" })}</span>{" "}
-            {t("pages.companySettings.interactionGovernanceIsCap", { defaultValue: "is the maximum a request may reach — set it to" })}{" "}
-            <span className="font-medium text-foreground">{t("pages.companySettings.policyOption.boardOnly")}</span>{" "}
-            {t("pages.companySettings.interactionGovernanceBoardSuffix", { defaultValue: "to always require the board. Tool-approval confirmations always stay board-only regardless of these settings." })}
-          </p>
-          {/*
-           * Responsive: below `sm` the row collapses to a single column so the
-           * two 170px selects never force horizontal overflow on a ~390px
-           * viewport (WCAG 2.1 SC 1.4.10 Reflow — design review R2). Each kind
-           * then stacks as: label → Default policy → Cap, each full-width with
-           * its own inline label. At `sm`+ it restores the aligned 3-col grid.
-           */}
-          <div className="grid grid-cols-1 gap-y-4 sm:grid-cols-[1fr_auto_auto] sm:items-center sm:gap-x-4 sm:gap-y-2.5">
-            <div className="hidden text-xs font-medium text-muted-foreground uppercase tracking-wide sm:block">
-              {t("pages.companySettings.kind", { defaultValue: "Kind" })}
-            </div>
-            <div className="hidden text-xs font-medium text-muted-foreground uppercase tracking-wide sm:block">
-              {t("pages.companySettings.defaultPolicy")}
-            </div>
-            <div className="hidden text-xs font-medium text-muted-foreground uppercase tracking-wide sm:block">
-              {t("pages.companySettings.cap")}
-            </div>
-            {ISSUE_THREAD_INTERACTION_KINDS.map((kind) => {
-              const entry = governance[kind] ?? {};
-              const kindLabel = INTERACTION_KIND_LABELS[kind];
-              return (
-                <Fragment key={kind}>
-                  <div className="text-sm font-medium sm:font-normal">{kindLabel}</div>
-                  <GovernanceSelect
-                    testId={`governance-${kind}-default`}
-                    ariaLabel={t("pages.companySettings.defaultResolverPolicyFor", { defaultValue: "Default resolver policy for {{kind}}", kind: kindLabel })}
-                    mobileLabel={t("pages.companySettings.defaultPolicy")}
-                    value={toSelectValue(entry.defaultPolicy)}
-                    disabled={governanceMutation.isPending}
-                    onChange={(v) => handleGovernanceChange(kind, "defaultPolicy", v)}
-                  />
-                  <GovernanceSelect
-                    testId={`governance-${kind}-cap`}
-                    ariaLabel={t("pages.companySettings.resolverCapFor", { defaultValue: "Resolver cap for {{kind}}", kind: kindLabel })}
-                    mobileLabel={t("pages.companySettings.cap")}
-                    value={toSelectValue(entry.cap)}
-                    disabled={governanceMutation.isPending}
-                    onChange={(v) => handleGovernanceChange(kind, "cap", v)}
-                  />
-                </Fragment>
-              );
-            })}
-          </div>
-          {governanceMutation.isError && (
-            <span className="text-xs text-destructive">
-              {governanceMutation.error instanceof Error
-                ? governanceMutation.error.message
-                : t("pages.companySettings.saveGovernanceFailed", { defaultValue: "Failed to save interaction governance" })}
-            </span>
-          )}
-        </div>
-      </div>
+      <InteractionGovernancePanel
+        governance={governance}
+        onChange={handleGovernanceChange}
+        isPending={governanceMutation.isPending}
+        errorMessage={
+          governanceMutation.isError
+            ? governanceMutation.error instanceof Error
+              ? governanceMutation.error.message
+              : "Failed to save interaction governance"
+            : null
+        }
+      />
 
-      {/* Import / Export */}
-      <div className="space-y-4">
-        <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          {t("pages.companySettings.companyPackages", { defaultValue: "Company Packages" })}
-        </div>
-        <div className="rounded-md border border-border px-4 py-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="outline" asChild>
-              <Link to="/company/export">
-                <Download className="mr-1.5 h-3.5 w-3.5" />
-                {t("pages.companySettings.export", { defaultValue: "Export" })}
-              </Link>
-            </Button>
-            <Button size="sm" variant="outline" asChild>
-              <Link to="/company/import">
-                <Upload className="mr-1.5 h-3.5 w-3.5" />
-                {t("pages.companySettings.import", { defaultValue: "Import" })}
-              </Link>
-            </Button>
-          </div>
-        </div>
-      </div>
+      <AgentObservabilitySettingsSection companyId={selectedCompanyId!} />
+
+      <InstanceGeneralSettings embedded />
 
       {/* Danger Zone */}
       <div className="space-y-4">
         <div className="text-xs font-medium text-destructive uppercase tracking-wide">
           {t("pages.companySettings.dangerZone", { defaultValue: "Danger Zone" })}
         </div>
-        <div className="space-y-3 rounded-md border border-destructive/40 bg-destructive/5 px-4 py-4">
+        <div className="space-y-3 bg-destructive/5 px-4 py-4">
           <p className="text-sm text-muted-foreground">
-            {t("pages.companySettings.archiveDescription", { defaultValue: "Archive this company to hide it from the sidebar. This persists in the database." })}
+            Archive this organization to hide it from the sidebar. This persists in
+            the database.
           </p>
           <div className="flex items-center gap-2">
             <Button
@@ -601,32 +396,23 @@ export function CompanySettings() {
               onClick={() => {
                 if (!selectedCompanyId) return;
                 const confirmed = window.confirm(
-                  t("pages.companySettings.archiveConfirm", { defaultValue: "Archive company {{name}}? It will be hidden from the sidebar.", name: selectedCompany.name })
+                  t("pages.companySettings.archiveConfirm", { defaultValue: "Archive organization {{name}}? It will be hidden from the sidebar.", name: selectedCompany.name })
                 );
                 if (!confirmed) return;
-                const nextCompanyId =
-                  companies.find(
-                    (company) =>
-                      company.id !== selectedCompanyId &&
-                      company.status !== "archived"
-                  )?.id ?? null;
-                archiveMutation.mutate({
-                  companyId: selectedCompanyId,
-                  nextCompanyId
-                });
+                archiveMutation.mutate({ companyId: selectedCompanyId });
               }}
             >
               {archiveMutation.isPending
                 ? t("pages.companySettings.archiving", { defaultValue: "Archiving..." })
                 : selectedCompany.status === "archived"
-                ? t("pages.companySettings.alreadyArchived", { defaultValue: "Already archived" })
-                : t("pages.companySettings.archiveCompany", { defaultValue: "Archive company" })}
+                ? "Already archived"
+                : "Archive organization"}
             </Button>
             {archiveMutation.isError && (
               <span className="text-xs text-destructive">
                 {archiveMutation.error instanceof Error
                   ? archiveMutation.error.message
-                  : t("pages.companySettings.archiveFailed", { defaultValue: "Failed to archive company" })}
+                  : t("pages.companySettings.archiveFailed", { defaultValue: "Failed to archive organization" })}
               </span>
             )}
           </div>

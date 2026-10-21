@@ -6,6 +6,7 @@
  * Direction C (PAP-12422): dense rows, mini-map brush, custom inline SVG.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { t, useTranslation } from "@/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { Bot, Clock3, Coins, GanttChartSquare, Minus, Plus, RotateCcw, type LucideIcon } from "lucide-react";
 import type { WorkTimelineResult } from "@paperclipai/shared";
@@ -30,7 +31,8 @@ import {
 } from "@/components/timeline/WorkTimelineChart";
 import { formatDuration, TIMELINE_COLORS } from "@/lib/timeline/layout";
 import { cn } from "@/lib/utils";
-import { t, useTranslation } from "@/i18n";
+import { useLocation } from "@/lib/router";
+import { useStreamlinedUiEnabled } from "@/hooks/useStreamlinedUiEnabled";
 
 type RangePreset = "today" | "7d" | "30d" | "custom";
 const TIMELINE_PAGE_LIMIT = 500;
@@ -305,10 +307,16 @@ function TimelineSummaryStats({
   );
 }
 
-export function Timeline() {
+export function Timeline({ embedded = false }: { embedded?: boolean } = {}) {
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { t } = useTranslation();
+  const location = useLocation();
+  const { enabled: streamlinedUiEnabled } = useStreamlinedUiEnabled();
+  const scopedProjectId = useMemo(
+    () => streamlinedUiEnabled ? new URLSearchParams(location.search).get("projectId") || undefined : undefined,
+    [location.search, streamlinedUiEnabled],
+  );
   const [zoom, setZoom] = useState<ZoomLevel>("day");
   const [zoomScale, setZoomScale] = useState<number | undefined>(undefined);
   const zoomTouched = useRef(false);
@@ -317,18 +325,20 @@ export function Timeline() {
   const [visibleWindow, setVisibleWindow] = useState<VisibleTimelineWindow | null>(null);
 
   useEffect(() => {
-    setBreadcrumbs([{ label: t("nav.timeline") }]);
-  }, [setBreadcrumbs, t]);
+    if (!embedded) {
+      setBreadcrumbs([{ label: scopedProjectId ? "Project Timeline" : "Timeline" }]);
+    }
+  }, [embedded, scopedProjectId, setBreadcrumbs]);
 
   const dateRangeError = rangeError(dateRange);
   const params: WorkTimelineParams | null = useMemo(() => {
     const window = rangeWindow(dateRange);
     if (!window) return null;
-    return window;
-  }, [dateRange]);
+    return scopedProjectId ? { ...window, projectId: scopedProjectId } : window;
+  }, [dateRange, scopedProjectId]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: [...queryKeys.workTimeline(selectedCompanyId ?? ""), dateRange.fromDate, dateRange.toDate],
+    queryKey: [...queryKeys.workTimeline(selectedCompanyId ?? ""), dateRange.fromDate, dateRange.toDate, scopedProjectId ?? null],
     queryFn: ({ signal }) => loadTimelineWindow(selectedCompanyId!, params!, signal),
     enabled: !!selectedCompanyId && !!params,
   });
@@ -355,8 +365,8 @@ export function Timeline() {
   if (!selectedCompanyId) {
     return (
       <>
-        <RequestCollapsedSidebar />
-        <EmptyState icon={GanttChartSquare} message={t("pages.timeline.selectCompany", { defaultValue: "Select a company to view its work timeline." })} />
+        {!embedded && <RequestCollapsedSidebar />}
+        <EmptyState icon={GanttChartSquare} message="Select an organization to view its work timeline." />
       </>
     );
   }
@@ -364,7 +374,9 @@ export function Timeline() {
   const header = (
     <div className="flex items-center gap-2">
       <GanttChartSquare className="h-6 w-6 text-muted-foreground" />
-      <h1 className="text-3xl font-semibold tracking-tight">{t("pages.timeline.title", { defaultValue: "Work Timeline" })}</h1>
+      <h1 className="text-3xl font-semibold tracking-tight">
+        {scopedProjectId ? "Project Timeline" : "Work Timeline"}
+      </h1>
     </div>
   );
 
@@ -467,7 +479,7 @@ export function Timeline() {
 
   return (
     <div className="space-y-6">
-      <RequestCollapsedSidebar />
+      {!embedded && <RequestCollapsedSidebar />}
       {header}
       {toolbar}
 
@@ -495,7 +507,10 @@ export function Timeline() {
       {data && !isLoading && !dateRangeError && (
         data.spans.length === 0 ? (
           <div className="space-y-3">
-            <EmptyState icon={GanttChartSquare} message={t("pages.timeline.noActivity", { defaultValue: "No activity in this window." })} />
+            <EmptyState
+              icon={GanttChartSquare}
+              message={scopedProjectId ? "No project activity in this window." : "No activity in this window."}
+            />
             <div className="flex flex-wrap items-center justify-end gap-3">
               {rangeControls}
             </div>

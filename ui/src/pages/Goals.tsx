@@ -29,7 +29,7 @@ export function Goals() {
   });
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Target} message={t("pages.goals.selectCompanyToViewGoals", { defaultValue: "Select a company to view goals." })} />;
+    return <EmptyState icon={Target} message={t("pages.goals.selectCompanyToViewGoals", { defaultValue: "Select an organization to view goals." })} />;
   }
 
   if (isLoading) {

@@ -101,7 +101,7 @@ export function Org() {
   });
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={GitBranch} message={t("pages.org.selectCompany", { defaultValue: "Select a company to view org chart." })} />;
+    return <EmptyState icon={GitBranch} message={t("pages.org.selectCompany", { defaultValue: "Select an organization to view org chart." })} />;
   }
 
   if (isLoading) {

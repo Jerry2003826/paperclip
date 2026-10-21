@@ -39,9 +39,8 @@ export function ProfileSettings() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: t("nav.settings"), href: "/company/settings" },
-      { label: t("pages.instanceSettings.title", { defaultValue: "Instance settings" }), href: "/company/settings/instance/general" },
-      { label: t("pages.profile.title", { defaultValue: "Profile" }) },
+      { label: "Settings", href: "/company/settings" },
+      { label: "Profile" },
     ]);
   }, [setBreadcrumbs, t]);
 
@@ -90,7 +89,7 @@ export function ProfileSettings() {
   const uploadAvatarMutation = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) {
-        throw new Error(t("pages.profile.selectCompanyBeforeAvatar", { defaultValue: "Select a company before uploading a profile avatar." }));
+        throw new Error(t("pages.profile.selectCompanyBeforeAvatar", { defaultValue: "Select an organization before uploading a profile avatar." }));
       }
 
       const asset = await assetsApi.uploadImage(
@@ -139,11 +138,11 @@ export function ProfileSettings() {
   const initials = deriveInitials(currentName);
   const isSavingProfile = updateMutation.isPending || uploadAvatarMutation.isPending || removeAvatarMutation.isPending;
   const uploadHint = selectedCompany
-    ? t("pages.profile.storedInFileStorage", { defaultValue: "Stored in Paperclip file storage for {{company}}.", company: selectedCompany.name })
-    : t("pages.profile.selectCompanyToUpload", { defaultValue: "Select a company to upload an avatar into Paperclip storage." });
+    ? `Stored in Paperclip file storage for ${selectedCompany.name}.`
+    : "Select an organization to upload an avatar into Paperclip storage.";
 
   return (
-    <div className="max-w-4xl space-y-6">
+    <div className="max-w-6xl space-y-6">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <UserRoundPen className="h-5 w-5 text-muted-foreground" />
@@ -273,9 +272,7 @@ export function ProfileSettings() {
           </div>
         </form>
 
-        <Card className="rounded-(--rad-28) border-border/70 p-6">
-          <InboxAgentPolicyControl companyId={selectedCompanyId} />
-        </Card>
+        <InboxAgentPolicyControl companyId={selectedCompanyId} />
       </section>
     </div>
   );

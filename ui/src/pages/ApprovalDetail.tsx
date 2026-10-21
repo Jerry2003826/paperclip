@@ -1,3 +1,4 @@
+import { AgentIdentity } from "@/components/AgentIdentity";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -216,8 +217,8 @@ export function ApprovalDetail() {
           {approval.requestedByAgentId && (
             <div className="flex items-center gap-2">
               <span className="text-muted-foreground text-xs">{t("pages.approvalDetail.requestedBy", { defaultValue: "Requested by" })}</span>
-              <Identity
-                name={agentNameById.get(approval.requestedByAgentId) ?? approval.requestedByAgentId.slice(0, 8)}
+              <AgentIdentity
+                agent={agents?.find((agent) => agent.id === approval.requestedByAgentId) ?? { id: approval.requestedByAgentId, name: "Agent" }}
                 size="sm"
               />
             </div>
@@ -337,8 +338,8 @@ export function ApprovalDetail() {
               <div className="flex items-center justify-between mb-1">
                 {comment.authorAgentId ? (
                   <Link to={`/agents/${comment.authorAgentId}`} className="hover:underline">
-                    <Identity
-                      name={agentNameById.get(comment.authorAgentId) ?? comment.authorAgentId.slice(0, 8)}
+                    <AgentIdentity
+                      agent={agents?.find((agent) => agent.id === comment.authorAgentId) ?? { id: comment.authorAgentId, name: "Agent" }}
                       size="sm"
                     />
                   </Link>

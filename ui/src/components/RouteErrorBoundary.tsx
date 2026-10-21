@@ -1,7 +1,9 @@
-import { Component, type ErrorInfo, type ReactNode } from "react";
+import { Component, Suspense, type ErrorInfo, type ReactNode } from "react";
+import { t } from "@/i18n";
 import { useLocation, useNavigate } from "@/lib/router";
 import { Button } from "@/components/ui/button";
-import { t } from "@/i18n";
+import { captureBrowserException } from "@/lib/sentry";
+import { PaperclipLoading } from "./AnimatedPaperclipIcon";
 
 type RouteErrorBoundaryInnerProps = {
   resetKey: string;
@@ -22,6 +24,7 @@ class RouteErrorBoundaryInner extends Component<RouteErrorBoundaryInnerProps, Ro
 
   override componentDidCatch(error: unknown, info: ErrorInfo): void {
     console.error("Page render failed", { error, componentStack: info.componentStack });
+    captureBrowserException(error, { boundary: "route", componentStack: info.componentStack });
   }
 
   override componentDidUpdate(prevProps: RouteErrorBoundaryInnerProps): void {
@@ -68,7 +71,7 @@ export function RouteErrorBoundary({ children }: { children: ReactNode }) {
 
   return (
     <RouteErrorBoundaryInner resetKey={resetKey} onReset={() => navigate(-1)}>
-      {children}
+      <Suspense fallback={<PaperclipLoading className="min-h-full" />}>{children}</Suspense>
     </RouteErrorBoundaryInner>
   );
 }

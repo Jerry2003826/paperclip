@@ -78,7 +78,7 @@ export function Approvals() {
   ).length;
 
   if (!selectedCompanyId) {
-    return <p className="text-sm text-muted-foreground">{t("pages.approvals.selectCompanyFirst", { defaultValue: "Select a company first." })}</p>;
+    return <p className="text-sm text-muted-foreground">{t("pages.approvals.selectCompanyFirst", { defaultValue: "Select an organization first." })}</p>;
   }
 
   if (isLoading) {
