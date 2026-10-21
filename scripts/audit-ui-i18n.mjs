@@ -1,13 +1,17 @@
-#!/usr/bin/env node
-
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import process from "node:process";
-import ts from "typescript";
+import { pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const uiRoot = path.join(repoRoot, "ui", "src");
 const scanRoots = [uiRoot];
+
+// TypeScript 7 no longer exposes the JavaScript compiler API, so parse with the
+// oxc parser that the UI's Vite toolchain already ships.
+const uiRequire = createRequire(path.join(repoRoot, "ui", "package.json"));
+const { parseSync } = await import(pathToFileURL(uiRequire.resolve("vite")).href);
 
 const skippedFilePatterns = [/\.d\.ts$/, /\.test\.tsx?$/, /\.stories\.tsx?$/];
 const translatableAttributes = /^(?:alt|aria-description|aria-label|buttonLabel|cancelLabel|confirmLabel|description|empty(?:Message|Text)|error(?:Message|Text)?|help(?:Text)?|hint|label|message|placeholder|subtitle|title|tooltip)$/i;
@@ -30,112 +34,155 @@ function containsEnglishWords(value) {
   return /[A-Za-z]{2,}/.test(value.replace(/{{value\d+}}/g, ""));
 }
 
-function expressionText(node, sourceFile) {
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
-  if (ts.isTemplateExpression(node)) {
-    let result = node.head.text;
-    node.templateSpans.forEach((span, index) => {
-      result += `{{value${index + 1}}}` + span.literal.text;
-    });
+function isNode(value) {
+  return Boolean(value) && typeof value === "object" && typeof value.type === "string";
+}
+
+function children(node) {
+  const result = [];
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "parent") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) if (isNode(item)) result.push(item);
+    } else if (isNode(value)) {
+      result.push(value);
+    }
+  }
+  return result.sort((left, right) => left.start - right.start);
+}
+
+function quasiText(quasi) {
+  return quasi.value.cooked ?? quasi.value.raw;
+}
+
+function expressionText(node) {
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  if (node.type === "TemplateLiteral") {
+    let result = quasiText(node.quasis[0]);
+    for (let index = 1; index < node.quasis.length; index += 1) {
+      result += `{{value${index}}}` + quasiText(node.quasis[index]);
+    }
     return result;
   }
   return null;
 }
 
 function callName(expression) {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return `${callName(expression.expression)}.${expression.name.text}`;
+  if (expression.type === "Identifier") return expression.name;
+  if (expression.type === "MemberExpression" && !expression.computed) return `${callName(expression.object)}.${expression.property.name}`;
   return "";
 }
 
-function lineOf(sourceFile, node) {
-  return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+function propertyKeyText(source, key) {
+  return source.slice(key.start, key.end);
 }
 
 function scanFile(filePath) {
   const source = fs.readFileSync(filePath, "utf8");
-  const sourceFile = ts.createSourceFile(
-    filePath,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    filePath.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+  const { program } = parseSync(filePath, source, { lang: filePath.endsWith(".tsx") ? "tsx" : "ts", sourceType: "module" });
+  const lineStarts = [0];
+  for (let index = 0; index < source.length; index += 1) if (source[index] === "\n") lineStarts.push(index + 1);
   const findings = [];
 
-  function add(kind, node, rawText) {
+  function lineAt(position) {
+    let low = 0;
+    let high = lineStarts.length - 1;
+    while (low < high) {
+      const middle = (low + high + 1) >> 1;
+      if (lineStarts[middle] <= position) low = middle;
+      else high = middle - 1;
+    }
+    return low + 1;
+  }
+
+  function add(kind, start, rawText) {
     const text = normalizeText(rawText);
     if (!text || !containsEnglishWords(text)) return;
     findings.push({
       file: path.relative(repoRoot, filePath),
-      line: lineOf(sourceFile, node),
+      line: lineAt(start),
       kind,
       text,
     });
   }
 
   function collectExpression(node, kind) {
-    if (ts.isCallExpression(node)) {
-      const name = callName(node.expression);
+    if (node.type === "CallExpression") {
+      const name = callName(node.callee);
       if (name === "t" || name.endsWith(".t")) return;
     }
-    const text = expressionText(node, sourceFile);
+    const text = expressionText(node);
     if (text !== null) {
-      add(kind, node, text);
+      add(kind, node.start, text);
       return;
     }
     if (
-      ts.isJsxElement(node) ||
-      ts.isJsxFragment(node) ||
-      ts.isJsxSelfClosingElement(node) ||
-      ts.isJsxAttribute(node)
+      node.type === "JSXElement" ||
+      node.type === "JSXFragment" ||
+      node.type === "JSXAttribute"
     ) return;
-    ts.forEachChild(node, (child) => collectExpression(child, kind));
+    for (const child of children(node)) collectExpression(child, kind);
   }
 
-  function visit(node) {
-    if (ts.isJsxText(node)) add("jsx-text", node, node.getText(sourceFile));
+  function visit(node, parent) {
+    if (node.type === "JSXText") {
+      const raw = source.slice(node.start, node.end);
+      add("jsx-text", node.start + (raw.length - raw.trimStart().length), raw);
+    }
 
-    if (ts.isJsxAttribute(node)) {
-      const attributeName = node.name.getText(sourceFile);
-      if (translatableAttributes.test(attributeName) && node.initializer) {
-        if (ts.isStringLiteral(node.initializer)) {
-          add(`attribute:${attributeName}`, node.initializer, node.initializer.text);
-        } else if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
-          collectExpression(node.initializer.expression, `attribute-expression:${attributeName}`);
+    if (node.type === "JSXAttribute") {
+      const attributeName = source.slice(node.name.start, node.name.end);
+      if (translatableAttributes.test(attributeName) && node.value) {
+        if (node.value.type === "Literal" && typeof node.value.value === "string") {
+          add(`attribute:${attributeName}`, node.value.start, source.slice(node.value.start + 1, node.value.end - 1));
+        } else if (node.value.type === "JSXExpressionContainer" && node.value.expression.type !== "JSXEmptyExpression") {
+          collectExpression(node.value.expression, `attribute-expression:${attributeName}`);
         }
       }
     }
 
-    if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) {
+    if (
+      node.type === "JSXExpressionContainer" &&
+      node.expression.type !== "JSXEmptyExpression" &&
+      parent?.type !== "JSXAttribute"
+    ) {
       collectExpression(node.expression, "jsx-expression");
     }
 
-    if (ts.isPropertyAssignment(node)) {
-      const propertyName = node.name.getText(sourceFile).replace(/["']/g, "");
+    if (node.type === "Property" && parent?.type === "ObjectExpression" && !node.computed && !node.shorthand && !node.method && node.kind === "init") {
+      const propertyName = propertyKeyText(source, node.key).replace(/["']/g, "");
       if (uiObjectProperties.test(propertyName)) {
-        const text = expressionText(node.initializer, sourceFile);
-        if (text !== null) add(`property:${propertyName}`, node.initializer, text);
+        const text = expressionText(node.value);
+        if (text !== null) add(`property:${propertyName}`, node.value.start, text);
       }
     }
 
-    if (ts.isParameter(node) && ts.isIdentifier(node.name) && uiObjectProperties.test(node.name.text) && node.initializer) {
-      const text = expressionText(node.initializer, sourceFile);
-      if (text !== null) add(`parameter:${node.name.text}`, node.initializer, text);
+    if (node.type === "AssignmentPattern" && node.left.type === "Identifier" && uiObjectProperties.test(node.left.name) && isParameterPosition(parent)) {
+      const text = expressionText(node.right);
+      if (text !== null) add(`parameter:${node.left.name}`, node.right.start, text);
     }
 
-    if (ts.isCallExpression(node) && userFeedbackCalls.test(callName(node.expression))) {
+    if (node.type === "CallExpression" && userFeedbackCalls.test(callName(node.callee))) {
       for (const argument of node.arguments) {
-        const text = expressionText(argument, sourceFile);
-        if (text !== null) add(`feedback:${callName(node.expression)}`, argument, text);
+        const text = expressionText(argument);
+        if (text !== null) add(`feedback:${callName(node.callee)}`, argument.start, text);
       }
     }
 
-    ts.forEachChild(node, visit);
+    for (const child of children(node)) visit(child, node);
   }
 
-  visit(sourceFile);
+  function isParameterPosition(parent) {
+    return Boolean(parent) && (
+      parent.type === "FunctionDeclaration" ||
+      parent.type === "FunctionExpression" ||
+      parent.type === "ArrowFunctionExpression" ||
+      parent.type === "FormalParameter" ||
+      parent.type === "TSParameterProperty"
+    );
+  }
+
+  visit(program, null);
   return findings;
 }
 

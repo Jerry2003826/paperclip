@@ -1,26 +1,67 @@
 import path from "node:path";
-import ts from "typescript";
-import type { Plugin } from "vite";
+import { parseSync, type Plugin } from "vite";
+
+// The static localization pass walks the ESTree/oxc AST that Vite already ships
+// (TypeScript 7 no longer exposes the JavaScript compiler API).
+type Node = { type: string; start: number; end: number; [key: string]: unknown };
 
 const helper = "__paperclipTranslateUiLiteral";
 const localeHook = "__paperclipUseUiLiteralLocale";
 const translatableAttributes = /^(?:alt|aria-description|aria-label|buttonLabel|cancelLabel|confirmLabel|description|empty(?:Message|Text)|error(?:Message|Text)?|help(?:Text)?|hint|label|message|placeholder|subtitle|title|tooltip)$/i;
 const userFeedbackCalls = /(?:^|\.)(?:addToast|alert|confirm|prompt|showToast|toast)$|(?:^|\.)(?:toast|toasts)\.(?:error|info|success|warn|warning)$/;
 const skippedElements = new Set(["code", "kbd", "noscript", "pre", "script", "style", "textarea"]);
+const transparentWrappers = new Set([
+  "ParenthesizedExpression",
+  "TSAsExpression",
+  "TSTypeAssertion",
+  "TSNonNullExpression",
+  "TSSatisfiesExpression",
+]);
 
-function callName(expression: ts.Expression): string {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return `${callName(expression.expression)}.${expression.name.text}`;
+function isNode(value: unknown): value is Node {
+  return Boolean(value) && typeof value === "object" && typeof (value as Node).type === "string";
+}
+
+function children(node: Node): Node[] {
+  const result: Node[] = [];
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "parent") continue;
+    if (Array.isArray(value)) {
+      for (const item of value) if (isNode(item)) result.push(item);
+    } else if (isNode(value)) {
+      result.push(value);
+    }
+  }
+  return result.sort((left, right) => left.start - right.start);
+}
+
+function callName(expression: Node): string {
+  if (expression.type === "Identifier") return expression.name as string;
+  if (expression.type === "MemberExpression" && !expression.computed) {
+    return `${callName(expression.object as Node)}.${(expression.property as Node).name as string}`;
+  }
   return "";
 }
 
-function expressionText(node: ts.Expression) {
-  if (ts.isStringLiteralLike(node)) return node.text;
-  if (ts.isTemplateExpression(node)) {
-    let value = node.head.text;
-    node.templateSpans.forEach((span, index) => {
-      value += `{{value${index + 1}}}${span.literal.text}`;
-    });
+function isTranslationCall(node: Node) {
+  if (node.type !== "CallExpression") return false;
+  const name = callName(node.callee as Node);
+  return name === "t" || name.endsWith(".t") || name === helper;
+}
+
+function quasiText(quasi: Node) {
+  const value = quasi.value as { cooked: string | null; raw: string };
+  return value.cooked ?? value.raw;
+}
+
+function expressionText(node: Node): string | null {
+  if (node.type === "Literal" && typeof node.value === "string") return node.value;
+  if (node.type === "TemplateLiteral") {
+    const quasis = node.quasis as Node[];
+    let value = quasiText(quasis[0]);
+    for (let index = 1; index < quasis.length; index += 1) {
+      value += `{{value${index}}}${quasiText(quasis[index])}`;
+    }
     return value;
   }
   return null;
@@ -45,15 +86,6 @@ function cleanJsxText(value: string) {
   return result;
 }
 
-function isInsideSkippedElement(node: ts.Node) {
-  for (let current = node.parent; current; current = current.parent) {
-    if (!ts.isJsxElement(current)) continue;
-    const tag = current.openingElement.tagName.getText().toLowerCase();
-    if (skippedElements.has(tag)) return true;
-  }
-  return false;
-}
-
 export function staticUiLocalization(): Plugin {
   return {
     name: "paperclip-static-ui-localization",
@@ -68,132 +100,146 @@ export function staticUiLocalization(): Plugin {
         /(?:\.test|\.stories)\.tsx?$/.test(id)
       ) return null;
 
-      const sourceFile = ts.createSourceFile(
-        id,
-        source,
-        ts.ScriptTarget.Latest,
-        true,
-        id.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-      );
+      const parsed = parseSync(id, source, { lang: id.endsWith(".tsx") ? "tsx" : "ts", sourceType: "module" });
+      const program = parsed.program as unknown as Node;
       const replacements = new Map<number, { end: number; value: string }>();
       const componentBodies = new Set<number>();
+      const ancestors: Node[] = [];
 
-      function markComponentOwner(node: ts.Node) {
-        for (let current = node.parent; current; current = current.parent) {
-          if (ts.isFunctionDeclaration(current) && current.name && /^[A-Z]/.test(current.name.text)) {
-            componentBodies.add(current.body.getStart(sourceFile) + 1);
-            return;
+      function isInsideSkippedElement() {
+        return ancestors.some((ancestor) => {
+          if (ancestor.type !== "JSXElement") return false;
+          const name = (ancestor.openingElement as Node).name as Node;
+          return skippedElements.has(source.slice(name.start, name.end).toLowerCase());
+        });
+      }
+
+      function markComponentOwner() {
+        for (let index = ancestors.length - 1; index >= 0; index -= 1) {
+          const current = ancestors[index];
+          if (current.type === "FunctionDeclaration") {
+            const name = (current.id as Node | null)?.name as string | undefined;
+            if (name && /^[A-Z]/.test(name)) {
+              componentBodies.add((current.body as Node).start + 1);
+              return;
+            }
+            continue;
           }
-          if (!ts.isArrowFunction(current) && !ts.isFunctionExpression(current)) continue;
-          if (!ts.isBlock(current.body)) continue;
-          let parent: ts.Node = current.parent;
-          if (ts.isCallExpression(parent)) parent = parent.parent;
-          if (
-            ts.isVariableDeclaration(parent) &&
-            ts.isIdentifier(parent.name) &&
-            /^[A-Z]/.test(parent.name.text)
-          ) {
-            componentBodies.add(current.body.getStart(sourceFile) + 1);
+          if (current.type !== "ArrowFunctionExpression" && current.type !== "FunctionExpression") continue;
+          const body = current.body as Node;
+          if (body.type !== "BlockStatement") continue;
+          let parentIndex = index - 1;
+          if (ancestors[parentIndex]?.type === "CallExpression") parentIndex -= 1;
+          const parent = ancestors[parentIndex];
+          const parentName = parent?.type === "VariableDeclarator" ? (parent.id as Node) : null;
+          if (parentName?.type === "Identifier" && /^[A-Z]/.test(parentName.name as string)) {
+            componentBodies.add(body.start + 1);
             return;
           }
         }
       }
 
-      function addExpression(node: ts.Expression) {
+      function addExpression(node: Node) {
         const text = expressionText(node);
         if (text === null || !containsEnglish(text)) return;
-        replacements.set(node.getStart(sourceFile), {
+        replacements.set(node.start, {
           end: node.end,
-          value: `${helper}(${node.getText(sourceFile)})`,
+          value: `${helper}(${source.slice(node.start, node.end)})`,
         });
-        markComponentOwner(node);
+        markComponentOwner();
       }
 
-      function collectRenderedExpression(node: ts.Expression) {
-        if (ts.isCallExpression(node)) {
-          const name = callName(node.expression);
-          if (name === "t" || name.endsWith(".t") || name === helper) return;
-        }
+      function collectRenderedExpression(node: Node) {
+        if (isTranslationCall(node)) return;
         if (expressionText(node) !== null) {
           addExpression(node);
           return;
         }
-        if (ts.isJsxElement(node) || ts.isJsxFragment(node) || ts.isJsxSelfClosingElement(node)) return;
-        if (
-          ts.isParenthesizedExpression(node) ||
-          ts.isAsExpression(node) ||
-          ts.isTypeAssertionExpression(node) ||
-          ts.isNonNullExpression(node) ||
-          ts.isSatisfiesExpression(node)
-        ) {
-          collectRenderedExpression(node.expression);
+        if (node.type === "JSXElement" || node.type === "JSXFragment") return;
+        if (transparentWrappers.has(node.type)) {
+          collectRenderedExpression(node.expression as Node);
           return;
         }
-        if (ts.isConditionalExpression(node)) {
-          collectRenderedExpression(node.whenTrue);
-          collectRenderedExpression(node.whenFalse);
+        if (node.type === "ConditionalExpression") {
+          collectRenderedExpression(node.consequent as Node);
+          collectRenderedExpression(node.alternate as Node);
           return;
         }
-        if (ts.isBinaryExpression(node)) {
-          const operator = node.operatorToken.kind;
-          if (operator === ts.SyntaxKind.AmpersandAmpersandToken) {
-            collectRenderedExpression(node.right);
-          } else if (
-            operator === ts.SyntaxKind.BarBarToken ||
-            operator === ts.SyntaxKind.QuestionQuestionToken ||
-            operator === ts.SyntaxKind.PlusToken
-          ) {
-            collectRenderedExpression(node.left);
-            collectRenderedExpression(node.right);
+        if (node.type === "LogicalExpression") {
+          if (node.operator !== "&&") collectRenderedExpression(node.left as Node);
+          collectRenderedExpression(node.right as Node);
+          return;
+        }
+        if (node.type === "BinaryExpression" && node.operator === "+") {
+          collectRenderedExpression(node.left as Node);
+          collectRenderedExpression(node.right as Node);
+          return;
+        }
+        if (node.type === "ArrayExpression") {
+          for (const element of node.elements as Array<Node | null>) {
+            if (element && element.type !== "SpreadElement") collectRenderedExpression(element);
           }
-          return;
-        }
-        if (ts.isArrayLiteralExpression(node)) {
-          node.elements.forEach((element) => {
-            if (ts.isExpression(element)) collectRenderedExpression(element);
-          });
         }
       }
 
-      function visit(node: ts.Node) {
-        if (ts.isCallExpression(node)) {
-          const name = callName(node.expression);
-          if (name === "t" || name.endsWith(".t") || name === helper) return;
-          if (userFeedbackCalls.test(name)) node.arguments.forEach(addExpression);
+      function visit(node: Node) {
+        if (node.type === "CallExpression") {
+          if (isTranslationCall(node)) return;
+          if (userFeedbackCalls.test(callName(node.callee as Node))) {
+            for (const argument of node.arguments as Node[]) addExpression(argument);
+          }
         }
 
-        if (ts.isJsxText(node) && !isInsideSkippedElement(node)) {
-          const text = cleanJsxText(node.getText(sourceFile));
+        if (node.type === "JSXText" && !isInsideSkippedElement()) {
+          // Like TypeScript's getStart(), leading whitespace stays outside the replacement.
+          const raw = source.slice(node.start, node.end);
+          const start = node.start + (raw.length - raw.trimStart().length);
+          const text = cleanJsxText(source.slice(start, node.end));
           if (containsEnglish(text)) {
-            replacements.set(node.getStart(sourceFile), {
+            replacements.set(start, {
               end: node.end,
               value: `{${helper}(${JSON.stringify(text)})}`,
             });
-            markComponentOwner(node);
+            markComponentOwner();
           }
         }
 
-        if (ts.isJsxAttribute(node)) {
-          const name = node.name.getText(sourceFile);
-          if (translatableAttributes.test(name) && node.initializer) {
-            if (ts.isStringLiteral(node.initializer) && containsEnglish(node.initializer.text)) {
-              replacements.set(node.initializer.getStart(sourceFile), {
-                end: node.initializer.end,
-                value: `{${helper}(${JSON.stringify(node.initializer.text)})}`,
-              });
-              markComponentOwner(node);
-            } else if (ts.isJsxExpression(node.initializer) && node.initializer.expression) {
-              collectRenderedExpression(node.initializer.expression);
+        if (node.type === "JSXAttribute") {
+          const nameNode = node.name as Node;
+          const name = source.slice(nameNode.start, nameNode.end);
+          const value = node.value as Node | null;
+          if (translatableAttributes.test(name) && value) {
+            if (value.type === "Literal" && typeof value.value === "string") {
+              const text = source.slice(value.start + 1, value.end - 1);
+              if (containsEnglish(text)) {
+                replacements.set(value.start, {
+                  end: value.end,
+                  value: `{${helper}(${JSON.stringify(text)})}`,
+                });
+                markComponentOwner();
+              }
+            } else if (value.type === "JSXExpressionContainer" && (value.expression as Node).type !== "JSXEmptyExpression") {
+              ancestors.push(node, value);
+              collectRenderedExpression(value.expression as Node);
+              ancestors.length -= 2;
             }
           }
-        } else if (ts.isJsxExpression(node) && node.expression && !ts.isJsxAttribute(node.parent)) {
-          collectRenderedExpression(node.expression);
+        } else if (
+          node.type === "JSXExpressionContainer" &&
+          (node.expression as Node).type !== "JSXEmptyExpression" &&
+          ancestors[ancestors.length - 1]?.type !== "JSXAttribute"
+        ) {
+          ancestors.push(node);
+          collectRenderedExpression(node.expression as Node);
+          ancestors.pop();
         }
 
-        ts.forEachChild(node, visit);
+        ancestors.push(node);
+        for (const child of children(node)) visit(child);
+        ancestors.pop();
       }
 
-      visit(sourceFile);
+      visit(program);
       if (!replacements.size) return null;
 
       for (const position of componentBodies) {
